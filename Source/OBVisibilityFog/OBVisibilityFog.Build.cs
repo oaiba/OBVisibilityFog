@@ -25,7 +25,7 @@ public class OBVisibilityFog : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core", "Engine",
+				"Core", "Engine", "RenderCore", "RHI",
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);

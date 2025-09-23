@@ -41,8 +41,11 @@ public:
 	void InitializeFogComponents(USceneCaptureComponent2D* CaptureComponent,
 								 UPostProcessComponent* PostProcessComponent, UMaterial* InFogPostProcessMaterial);
 
+	// UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
+	// void UpdateTeammateData(const TArray<FTeammateVisionData>& InTeammateData);
+
 	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
-	void UpdateTeammateData(const TArray<FTeammateVisionData>& InTeammateData);
+	void UpdateData(const TArray<FTeammateVisionData>& InTeammateData);
 
 protected:
 	virtual void BeginPlay() override;
@@ -98,8 +101,8 @@ public:
 private:
 	// --- CÁC THUỘC TÍNH MỚI ---
     
-	// Mảng lưu trữ dữ liệu của team, được cập nhật từ bên ngoài
-	TArray<FTeammateVisionData> CurrentTeammateData;
+	// // Mảng lưu trữ dữ liệu của team, được cập nhật từ bên ngoài
+	// TArray<FTeammateVisionData> CurrentTeammateData;
     
 	// Texture chứa dữ liệu (vị trí, hướng nhìn...) để gửi vào shader
 	UPROPERTY(Transient)
@@ -111,4 +114,6 @@ private:
 
 	const int32 MaxTeamSize = 8; // Số lượng người chơi tối đa hệ thống hỗ trợ
 	const int32 DataPointsPerPlayer = 2; // 1 cho vị trí, 1 cho hướng nhìn
+
+	bool bIsReadyToTick = false;
 };
