@@ -7,6 +7,22 @@
 #include "Components/PostProcessComponent.h"
 #include "OBVisibilityFogComponent.generated.h"
 
+USTRUCT(BlueprintType)
+struct FTeammateVisionData
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+    FVector EyeLocation;
+
+    UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+    FVector ForwardVector;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+	FVector GroundLocation;
+
+};
+
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class OBVISIBILITYFOG_API UOBVisibilityFogComponent : public UActorComponent
 {
@@ -19,10 +35,14 @@ public:
 	 * Function to set up required components from Blueprint or C++.
 	 * @param CaptureComponent SceneCapture2D component to be used.
 	 * @param PostProcessComponent PostProcess component to be used.
+	 * @param InFogPostProcessMaterial
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
 	void InitializeFogComponents(USceneCaptureComponent2D* CaptureComponent,
-								 UPostProcessComponent* PostProcessComponent);
+								 UPostProcessComponent* PostProcessComponent, UMaterial* InFogPostProcessMaterial);
+
+	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
+	void UpdateTeammateData(const TArray<FTeammateVisionData>& InTeammateData);
 
 protected:
 	virtual void BeginPlay() override;
@@ -43,6 +63,9 @@ public:
 	/** The Render Target asset to store the depth map. ASSIGN IN BLUEPRINT EDITOR. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
 	TObjectPtr<UTextureRenderTarget2D> DepthRenderTarget;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
+	TObjectPtr<UMaterial> FogPostProcessMaterial;
 
 	/** The Material Parameter Collection to send data to shaders. ASSIGN IN BLUEPRINT EDITOR. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
@@ -71,4 +94,21 @@ public:
 	// Enable/disable show the debug message on the screen
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Debug")
 	bool bIsShowDebugMessage = false;
+
+private:
+	// --- CÁC THUỘC TÍNH MỚI ---
+    
+	// Mảng lưu trữ dữ liệu của team, được cập nhật từ bên ngoài
+	TArray<FTeammateVisionData> CurrentTeammateData;
+    
+	// Texture chứa dữ liệu (vị trí, hướng nhìn...) để gửi vào shader
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> SourceDataTexture;
+
+	// Material Instance của Post Process để set các tham số động
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> PostProcessMID;
+
+	const int32 MaxTeamSize = 8; // Số lượng người chơi tối đa hệ thống hỗ trợ
+	const int32 DataPointsPerPlayer = 2; // 1 cho vị trí, 1 cho hướng nhìn
 };
