@@ -7,36 +7,22 @@
 #include "Components/PostProcessComponent.h"
 #include "OBVisibilityFogComponent.generated.h"
 
-/**
- * @struct FTeammateVisionData
- * @brief Struct để lưu trữ dữ liệu về tầm nhìn cần thiết của một người chơi.
- * Dữ liệu này sẽ được gửi vào texture để shader xử lý.
- */
+// Struct FTeammateVisionData vẫn hữu ích để tổ chức dữ liệu nội bộ
 USTRUCT(BlueprintType)
 struct FTeammateVisionData
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    // Vị trí mắt (nguồn của tầm nhìn)
-    UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
-    FVector EyeLocation;
+	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+	FVector EyeLocation;
 
-    // Vector chỉ hướng nhìn về phía trước
-    UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
-    FVector ForwardVector;
+	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+	FVector ForwardVector;
 
-    // Vị trí trên mặt đất, dùng cho vùng bán kính xung quanh
 	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
 	FVector GroundLocation;
-
 };
 
-/**
- * @class UOBVisibilityFogComponent
- * @brief Quản lý logic sương mù chiến tranh (Fog of War) cho một Actor.
- * Component này chịu trách nhiệm thu thập dữ liệu tầm nhìn, cập nhật các tham số cho material
- * và render hiệu ứng che khuất cuối cùng thông qua Post Process.
- */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class OBVISIBILITYFOG_API UOBVisibilityFogComponent : public UActorComponent
 {
@@ -44,92 +30,81 @@ class OBVISIBILITYFOG_API UOBVisibilityFogComponent : public UActorComponent
 
 public:
 	UOBVisibilityFogComponent();
+	
+	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
+	void InitializeFogComponents(UPostProcessComponent* InPostProcessComponent);
 
 	/**
-	 * Khởi tạo các component cần thiết từ Blueprint hoặc C++.
-	 * @param CaptureComponent SceneCapture2D component để ghi lại depth map.
-	 * @param PostProcessComponent PostProcess component để áp dụng hiệu ứng sương mù.
-	 * @param InFogPostProcessMaterial Material dùng cho hiệu ứng post process.
+	 * Khởi tạo component với các Scene Capture cần thiết.
+	 * Phải được gọi sau BeginPlay từ một đối tượng quản lý.
+	 * @param InLocalCaptureComponent Scene Capture của người chơi đang điều khiển.
+	 * @param InTeammateCaptureComponents Mảng các Scene Capture của đồng đội.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
-	void InitializeFogComponents(USceneCaptureComponent2D* CaptureComponent,
-								 UPostProcessComponent* PostProcessComponent, UMaterial* InFogPostProcessMaterial);
+	void Initialize(USceneCaptureComponent2D* InLocalCaptureComponent,
+					const TArray<USceneCaptureComponent2D*>& InTeammateCaptureComponents);
 
 	/**
-	 * Cập nhật dữ liệu tầm nhìn từ tất cả các nguồn (bản thân và đồng đội).
-	 * Đây là hàm chính để chạy logic mỗi frame.
-	 * @param InTeammateData Mảng chứa dữ liệu tầm nhìn của các đồng đội.
+	 * Cập nhật toàn bộ logic sương mù.
+	 * Hàm này sẽ tự động lấy thông tin từ các Scene Capture đã được Initialize.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
-	void UpdateData(const TArray<FTeammateVisionData>& InTeammateData);
+	void UpdateData();
 
 protected:
 	virtual void BeginPlay() override;
 
 public:
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
-							   FActorComponentTickFunction* ThisTickFunction) override;
-
-	// --- CÁC THAM SỐ CẤU HÌNH (Được thiết lập trên Character) ---
-
-	/** Component dùng để ghi lại depth map từ góc nhìn của người chơi local. GÁN TRONG BLUEPRINT. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
-	TObjectPtr<USceneCaptureComponent2D> DepthCaptureComponent;
-
-	/** Component PostProcess để áp dụng material sương mù lên toàn màn hình. GÁN TRONG BLUEPRINT. */
+	// --- CÁC THAM SỐ CẤU HÌNH ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
 	TObjectPtr<UPostProcessComponent> FogPostProcessComponent;
 
-	/** Render Target để lưu trữ depth map được ghi lại. GÁN TRONG BLUEPRINT. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
-	TObjectPtr<UTextureRenderTarget2D> DepthRenderTarget;
-
-	/** Material Post Process chính chứa logic shader sương mù. GÁN TRONG BLUEPRINT. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
 	TObjectPtr<UMaterial> FogPostProcessMaterial;
 
-	/** Material Parameter Collection để gửi dữ liệu chung (vd: ma trận) vào shader. GÁN TRONG BLUEPRINT. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
-	TObjectPtr<UMaterialParameterCollection> VisionMPC;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
+	int32 RenderTargetResolution = 512;
 
-	/** Khoảng cách tối đa của hình nón tầm nhìn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float VisionDistance = 2000.0f;
-	
-	/** Góc của hình nón tầm nhìn (tính bằng độ). */
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float VisionAngleDegrees = 90.0f;
 
-	/** Bán kính của vùng phát hiện xung quanh người chơi. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
-	float ProximityRadius = 100.0f; 
+	float ProximityRadius = 100.0f;
 
-	/** Chiều cao tối đa mà vùng bán kính xung quanh có thể ảnh hưởng. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float ProximityMaxHeight = 200.0f;
-	
-	/** Bật/tắt hiển thị debug. */
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
+	TEnumAsByte<ECollisionChannel> GroundTraceChannel = ECC_Visibility;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Debug")
 	bool bIsShowDebug = false;
 
-	/** Bật/tắt hiển thị thông báo debug trên màn hình. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Debug")
-	bool bIsShowDebugMessage = false;
-
 private:
-	// Texture dùng để chứa dữ liệu vị trí và hướng nhìn của tất cả người chơi.
+	// --- CÁC THUỘC TÍNH QUẢN LÝ BÊN TRONG ---
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture2D> SourceDataTexture;
 
-	// Material Instance Dynamic của Post Process để có thể thay đổi tham số lúc runtime.
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> MatrixDataTexture;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> PostProcessMID;
-	
-	// Số lượng người chơi tối đa mà hệ thống hỗ trợ.
-	const int32 MaxTeamSize = 8;
-	// Số điểm dữ liệu cho mỗi người chơi (1 cho vị trí, 1 cho hướng nhìn).
-	const int32 DataPointsPerPlayer = 2;
 
-	// Cờ để đảm bảo logic chỉ chạy khi component đã sẵn sàng.
+	// Pool này giờ sẽ lưu trữ các con trỏ được truyền vào từ bên ngoài
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<USceneCaptureComponent2D>> CaptureComponentPool;
+
+	// Pool này vẫn được tạo và sở hữu bởi component này
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UTextureRenderTarget2D>> RenderTargetPool;
+
+	const int32 MaxTeamSize = 8;
+	const int32 DataPointsPerPlayer = 2;
+	const int32 MatrixDataPointsPerPlayer = 4;
+
 	bool bIsReadyToUpdate = false;
 };

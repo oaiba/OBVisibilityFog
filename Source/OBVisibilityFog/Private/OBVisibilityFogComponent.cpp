@@ -1,258 +1,250 @@
 ﻿// Fill out your copyright notice in the Description page of Project Settings.
 
-
 #include "OBVisibilityFogComponent.h"
-
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
-#include "Kismet/KismetMaterialLibrary.h"
-#include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Rendering/Texture2DResource.h"
+#include "Engine/World.h"
 
 UOBVisibilityFogComponent::UOBVisibilityFogComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	// Mặc định tắt Tick, sẽ được bật lại trong BeginPlay nếu mọi thứ hợp lệ
-	SetComponentTickEnabled(false);
 }
 
-void UOBVisibilityFogComponent::InitializeFogComponents(USceneCaptureComponent2D* CaptureComponent,
-														UPostProcessComponent* PostProcessComponent,
-														UMaterial* InFogPostProcessMaterial)
+void UOBVisibilityFogComponent::InitializeFogComponents(UPostProcessComponent* InPostProcessComponent)
 {
-	DepthCaptureComponent = CaptureComponent;
-	FogPostProcessComponent = PostProcessComponent;
-	FogPostProcessMaterial = InFogPostProcessMaterial;
+	FogPostProcessComponent = InPostProcessComponent;
+
+	if (!FogPostProcessComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("InitializeFogComponents: One or more components are null. Disabling tick."));
+		SetComponentTickEnabled(false);
+	}
 }
 
 void UOBVisibilityFogComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// --- BƯỚC 1: KIỂM TRA CÁC ĐỐI TƯỢNG PHỤ THUỘC ---
-	if (!IsValid(DepthCaptureComponent) || !IsValid(DepthRenderTarget) || !IsValid(VisionMPC) || !
-		IsValid(FogPostProcessComponent) || !IsValid(FogPostProcessMaterial))
+	// --- BƯỚC 1: KIỂM TRA DEPENDENCIES CƠ BẢN ---
+	if (!IsValid(FogPostProcessComponent) || !IsValid(FogPostProcessMaterial))
 	{
 		UE_LOG(LogTemp, Warning,
-			   TEXT(
-				   "UOBVisibilityFogComponent trên Actor '%s' thiếu các dependency cần thiết. Component sẽ bị vô hiệu hóa."
-			   ), *GetOwner()->GetName());
-		return; // Không tiếp tục nếu thiếu
+			   TEXT("UOBVisibilityFogComponent trên '%s' thiếu FogPostProcessComponent hoặc FogPostProcessMaterial."),
+			   *GetOwner()->GetName());
+		return;
 	}
 
-	// --- BƯỚC 2: CẤU HÌNH SCENECAPTURE COMPONENT ---
-	DepthCaptureComponent->TextureTarget = DepthRenderTarget;
-	DepthCaptureComponent->CaptureSource = SCS_SceneDepth;
-	DepthCaptureComponent->ProjectionType = ECameraProjectionMode::Perspective;
-	DepthCaptureComponent->bCaptureEveryFrame = false; // Tắt tự động capture để tiết kiệm hiệu năng
-	DepthCaptureComponent->bCaptureOnMovement = false;
-	DepthCaptureComponent->bRenderInMainRenderer = true; // ???
+	// --- BƯỚC 2: TẠO CÁC TÀI NGUYÊN SỞ HỮU BỞI COMPONENT NÀY ---
+	// Tạo Data Textures
+	const int32 SourceDataTextureWidth = MaxTeamSize * DataPointsPerPlayer;
+	SourceDataTexture = UTexture2D::CreateTransient(SourceDataTextureWidth, 1, PF_A32B32G32R32F);
+	if (SourceDataTexture) SourceDataTexture->UpdateResource();
 
-	// --- BƯỚC 3: TẠO DATA TEXTURE ĐỂ GỬI VÀO SHADER ---
-	const int32 TextureWidth = MaxTeamSize * DataPointsPerPlayer;
-	SourceDataTexture = UTexture2D::CreateTransient(TextureWidth, 1, PF_A32B32G32R32F);
-	if (SourceDataTexture)
+	const int32 MatrixDataTextureWidth = MaxTeamSize * MatrixDataPointsPerPlayer;
+	MatrixDataTexture = UTexture2D::CreateTransient(MatrixDataTextureWidth, 1, PF_A32B32G32R32F);
+	if (MatrixDataTexture) MatrixDataTexture->UpdateResource();
+
+	// Tạo Pool Render Target
+	RenderTargetPool.Reserve(MaxTeamSize);
+	for (int32 i = 0; i < MaxTeamSize; ++i)
 	{
-		SourceDataTexture->UpdateResource();
+		UTextureRenderTarget2D* NewRT = NewObject<UTextureRenderTarget2D>(this);
+		NewRT->InitCustomFormat(RenderTargetResolution, RenderTargetResolution, PF_R32_FLOAT, true);
+		NewRT->UpdateResource();
+		RenderTargetPool.Add(NewRT);
 	}
 
-	// --- BƯỚC 4: CẤU HÌNH POST PROCESS ---
-	// Tạo Material Instance Dynamic (MID) để có thể thay đổi tham số lúc runtime
+	// --- BƯỚC 3: CẤU HÌNH POST PROCESS ---
 	PostProcessMID = UMaterialInstanceDynamic::Create(FogPostProcessMaterial, this);
 	if (!PostProcessMID)
 	{
-		UE_LOG(LogTemp, Error, TEXT("UOBVisibilityFogComponent: Không thể tạo MID từ FogPostProcessMaterial."));
+		UE_LOG(LogTemp, Error, TEXT("UOBVisibilityFogComponent: Không thể tạo MID."));
 		return;
 	}
 
-	// Gán các texture và tham số cố định vào MID
-	PostProcessMID->SetTextureParameterValue(FName("DepthMap"), DepthRenderTarget);
-	PostProcessMID->SetTextureParameterValue(FName("TeamDataTex"), SourceDataTexture);
+	PostProcessMID->SetTextureParameterValue(FName("SourceDataTex"), SourceDataTexture);
+	PostProcessMID->SetTextureParameterValue(FName("MatrixDataTex"), MatrixDataTexture);
 
-	// Thêm MID vào PostProcessComponent để nó được áp dụng
+	for (int32 i = 0; i < MaxTeamSize; ++i)
+	{
+		FName ParamName = *FString::Printf(TEXT("DepthMap%d"), i);
+		PostProcessMID->SetTextureParameterValue(ParamName, RenderTargetPool[i]);
+	}
+
 	FogPostProcessComponent->Settings.AddBlendable(PostProcessMID, 1.0f);
+}
 
-	// Tối ưu hóa các hiệu ứng không cần thiết khác trong PostProcess
-	FPostProcessSettings& Settings = FogPostProcessComponent->Settings;
-	Settings.bOverride_BloomIntensity = true;
-	Settings.BloomIntensity = 0.0f;
-	Settings.bOverride_AutoExposureMinBrightness = true;
-	Settings.bOverride_AutoExposureMaxBrightness = true;
-	Settings.AutoExposureMinBrightness = 1.0f;
-	Settings.AutoExposureMaxBrightness = 1.0f;
-	Settings.bOverride_MotionBlurAmount = true;
-	Settings.MotionBlurAmount = 0.0f;
-	Settings.bOverride_AmbientOcclusionIntensity = true;
-	Settings.AmbientOcclusionIntensity = 0.0f;
-	Settings.bOverride_VignetteIntensity = true;
-	Settings.VignetteIntensity = 0.0f;
+void UOBVisibilityFogComponent::Initialize(USceneCaptureComponent2D* InLocalCaptureComponent,
+										   const TArray<USceneCaptureComponent2D*>& InTeammateCaptureComponents)
+{
+	if (!IsValid(InLocalCaptureComponent))
+	{
+		UE_LOG(LogTemp, Error, TEXT("UOBVisibilityFogComponent::Initialize - InLocalCaptureComponent không hợp lệ!"));
+		return;
+	}
 
-	// Mọi thứ đã sẵn sàng, bật Tick Component
+	CaptureComponentPool.Empty();
+	CaptureComponentPool.Add(InLocalCaptureComponent);
+	CaptureComponentPool.Append(InTeammateCaptureComponents);
+
+	// Giới hạn số lượng component trong pool để tránh lỗi
+	if (CaptureComponentPool.Num() > MaxTeamSize)
+	{
+		CaptureComponentPool.SetNum(MaxTeamSize);
+		UE_LOG(LogTemp, Warning, TEXT("Số lượng Scene Capture (%d) vượt quá MaxTeamSize (%d). Đã cắt bớt."),
+			   CaptureComponentPool.Num(), MaxTeamSize);
+	}
+
+	// Cấu hình từng Scene Capture Component được truyền vào
+	for (int32 i = 0; i < CaptureComponentPool.Num(); ++i)
+	{
+		if (USceneCaptureComponent2D* Capture = CaptureComponentPool[i])
+		{
+			Capture->CaptureSource = SCS_SceneDepth;
+			Capture->ProjectionType = ECameraProjectionMode::Perspective;
+			Capture->TextureTarget = RenderTargetPool[i]; // Gán RT tương ứng
+			Capture->bCaptureEveryFrame = false;
+			Capture->bCaptureOnMovement = false;
+		}
+	}
+
 	bIsReadyToUpdate = true;
 	SetComponentTickEnabled(true);
+	UE_LOG(LogTemp, Log, TEXT("UOBVisibilityFogComponent Initialized với %d Scene Capture Components."),
+		   CaptureComponentPool.Num());
 }
 
-void UOBVisibilityFogComponent::TickComponent(float DeltaTime, ELevelTick TickType,
-											  FActorComponentTickFunction* ThisTickFunction)
+
+void UOBVisibilityFogComponent::UpdateData()
 {
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	// Logic chính được gọi từ bên ngoài thông qua hàm UpdateData
-}
+	if (!bIsReadyToUpdate || !HasBegunPlay() || CaptureComponentPool.Num() == 0) return;
 
-void UOBVisibilityFogComponent::UpdateData(const TArray<FTeammateVisionData>& InTeammateData)
-{
-	// Chỉ thực thi nếu component đã được khởi tạo thành công và đang trong game
-	if (!bIsReadyToUpdate || !HasBegunPlay())
-	{
-		return;
-	}
+	const int32 NumSources = CaptureComponentPool.Num();
 
-	// --- BƯỚC 1: KIỂM TRA CÁC ĐỐI TƯỢNG CẦN THIẾT TRƯỚC KHI UPDATE ---
-	// Dù đã kiểm tra ở BeginPlay, kiểm tra lại để đảm bảo an toàn
-	if (!VisionMPC || !DepthCaptureComponent || !DepthRenderTarget || !PostProcessMID || !SourceDataTexture)
-	{
-		return;
-	}
+	// --- BƯỚC 1: CẬP NHẬT TẤT CẢ DEPTH MAP VÀ MA TRẬN ---
+	TArray<FLinearColor>* SourceTextureDataCopy = new TArray<FLinearColor>();
+	SourceTextureDataCopy->SetNumZeroed(MaxTeamSize * DataPointsPerPlayer);
 
-	// --- BƯỚC 2: TẬP HỢP DỮ LIỆU TẦM NHÌN (BẢN THÂN + ĐỒNG ĐỘI) ---
-	const AActor* OwnerActor = GetOwner();
-	if (!IsValid(OwnerActor)) return;
+	TArray<FLinearColor>* MatrixTextureDataCopy = new TArray<FLinearColor>();
+	MatrixTextureDataCopy->SetNumZeroed(MaxTeamSize * MatrixDataPointsPerPlayer);
 
-	TArray<FTeammateVisionData> AllSourcesData;
-	AllSourcesData.Reserve(InTeammateData.Num() + 1);
-
-	// Thêm dữ liệu của chính người chơi local vào đầu danh sách
-	FTeammateVisionData MyData;
-	MyData.EyeLocation = DepthCaptureComponent->GetComponentLocation();
-	MyData.ForwardVector = OwnerActor->GetActorForwardVector();
-	// Giả định vị trí mặt đất, có thể cải thiện bằng line trace nếu cần
-	MyData.GroundLocation = OwnerActor->GetActorLocation();
-	AllSourcesData.Add(MyData);
-
-	// Thêm dữ liệu của các đồng đội
-	AllSourcesData.Append(InTeammateData);
-
-	const int32 NumSources = FMath::Min(AllSourcesData.Num(), MaxTeamSize);
-
-	// --- BƯỚC 3: CẬP NHẬT DATA TEXTURE VỚI DỮ LIỆU MỚI (THREAD-SAFE) ---
-	const int32 TextureWidth = MaxTeamSize * DataPointsPerPlayer;
-	// Tạo một bản sao dữ liệu để gửi sang Render Thread
-	TArray<FLinearColor>* TextureDataCopy = new TArray<FLinearColor>();
-	TextureDataCopy->SetNumZeroed(TextureWidth);
+	TArray<FTeammateVisionData> AllDebugData; // Chỉ dùng cho việc vẽ debug
+	if (bIsShowDebug) AllDebugData.Reserve(NumSources);
 
 	for (int32 i = 0; i < NumSources; ++i)
 	{
-		const FTeammateVisionData& Source = AllSourcesData[i];
-		// Dữ liệu 1: Vị trí mắt (XYZ), Vị trí mặt đất (W là Z)
-		(*TextureDataCopy)[i * DataPointsPerPlayer + 0] = FLinearColor(Source.EyeLocation.X, Source.EyeLocation.Y,
-																	   Source.EyeLocation.Z, Source.GroundLocation.Z);
-		// Dữ liệu 2: Hướng nhìn (XYZ)
-		(*TextureDataCopy)[i * DataPointsPerPlayer + 1] = FLinearColor(Source.ForwardVector.X, Source.ForwardVector.Y,
-																	   Source.ForwardVector.Z, 0.0f);
+		USceneCaptureComponent2D* Capture = CaptureComponentPool[i];
+		if (!IsValid(Capture)) continue;
+
+		// 1.1. Lấy dữ liệu trực tiếp từ component
+		FTeammateVisionData CurrentSourceData;
+		CurrentSourceData.EyeLocation = Capture->GetComponentLocation();
+		CurrentSourceData.ForwardVector = Capture->GetForwardVector();
+
+		// 1.2. Tìm vị trí mặt đất bằng Line Trace
+		FHitResult HitResult;
+		FVector StartTrace = CurrentSourceData.EyeLocation;
+		FVector EndTrace = StartTrace - FVector(0, 0, VisionDistance * 2.0f);
+		if (GetWorld()->LineTraceSingleByChannel(HitResult, StartTrace, EndTrace, GroundTraceChannel))
+		{
+			CurrentSourceData.GroundLocation = HitResult.Location;
+		}
+		else
+		{
+			CurrentSourceData.GroundLocation = CurrentSourceData.EyeLocation - FVector(0, 0, 88.0f);
+		}
+
+		if (bIsShowDebug) AllDebugData.Add(CurrentSourceData);
+
+		// 1.3. Cập nhật và thực hiện Scene Capture
+		Capture->FOVAngle = VisionAngleDegrees;
+		Capture->CaptureScene();
+
+		// 1.4. Tính toán ma trận View-Projection
+		const FMatrix ViewMatrix = FLookFromMatrix(CurrentSourceData.EyeLocation, CurrentSourceData.ForwardVector,
+												   FVector::UpVector);
+		const float AspectRatio = 1.0f;
+		const float HorizontalFOVRadians = FMath::DegreesToRadians(VisionAngleDegrees);
+		const float VerticalFOVRadians = 2.0f * FMath::Atan(FMath::Tan(HorizontalFOVRadians * 0.5f) / AspectRatio);
+		const FMatrix ProjectionMatrix = FReversedZPerspectiveMatrix(VerticalFOVRadians * 0.5f, AspectRatio, 1.0f,
+																	 VisionDistance);
+		const FMatrix ViewProjectionMatrix = ViewMatrix * ProjectionMatrix;
+
+		// 1.5. Đóng gói dữ liệu vào các mảng TextureDataCopy
+		(*SourceTextureDataCopy)[i * DataPointsPerPlayer + 0] = FLinearColor(
+			CurrentSourceData.EyeLocation.X, CurrentSourceData.EyeLocation.Y, CurrentSourceData.EyeLocation.Z,
+			CurrentSourceData.GroundLocation.Z);
+		(*SourceTextureDataCopy)[i * DataPointsPerPlayer + 1] = FLinearColor(
+			CurrentSourceData.ForwardVector.X, CurrentSourceData.ForwardVector.Y, CurrentSourceData.ForwardVector.Z,
+			0.0f);
+		for (int row = 0; row < 4; ++row)
+		{
+			(*MatrixTextureDataCopy)[i * MatrixDataPointsPerPlayer + row] = FLinearColor(
+				ViewProjectionMatrix.M[row][0], ViewProjectionMatrix.M[row][1], ViewProjectionMatrix.M[row][2],
+				ViewProjectionMatrix.M[row][3]);
+		}
 	}
 
-	if (FTexture2DResource* TextureResource = static_cast<FTexture2DResource*>(SourceDataTexture->GetResource()))
+	// --- BƯỚC 2: GỬI DỮ LIỆU LÊN GPU (THREAD-SAFE) ---
+	// (Không thay đổi so với phiên bản trước)
+	if (SourceDataTexture && SourceDataTexture->GetResource())
 	{
-		ENQUEUE_RENDER_COMMAND(UpdateTeamDataTexture)(
-			[TextureResource, TextureDataCopy, TextureWidth](FRHICommandListImmediate& RHICmdList)
+		ENQUEUE_RENDER_COMMAND(UpdateSourceDataTexture)(
+			[Res = (FTexture2DResource*)SourceDataTexture->GetResource(), Data = SourceTextureDataCopy, Width =
+				MaxTeamSize * DataPointsPerPlayer](FRHICommandListImmediate& RHICmdList)
 			{
-				const int32 DataSize = TextureWidth * sizeof(FLinearColor);
-				const FUpdateTextureRegion2D Region(0, 0, 0, 0, TextureWidth, 1);
-				RHICmdList.UpdateTexture2D(TextureResource->GetTexture2DRHI(), 0, Region, DataSize,
-										   reinterpret_cast<const uint8*>(TextureDataCopy->GetData()));
-				// Quan trọng: Giải phóng bộ nhớ sau khi đã sử dụng xong trên Render Thread
-				delete TextureDataCopy;
+				const FUpdateTextureRegion2D Region(0, 0, 0, 0, Width, 1);
+				RHICmdList.UpdateTexture2D(Res->GetTexture2DRHI(), 0, Region, Width * sizeof(FLinearColor),
+										   reinterpret_cast<const uint8*>(Data->GetData()));
+				delete Data;
 			}
 		);
 	}
-	else
+	else { delete SourceTextureDataCopy; }
+
+	if (MatrixDataTexture && MatrixDataTexture->GetResource())
 	{
-		// Nếu không thể gửi lệnh, vẫn phải giải phóng bộ nhớ để tránh memory leak
-		delete TextureDataCopy;
+		ENQUEUE_RENDER_COMMAND(UpdateMatrixDataTexture)(
+			[Res = (FTexture2DResource*)MatrixDataTexture->GetResource(), Data = MatrixTextureDataCopy, Width =
+				MaxTeamSize * MatrixDataPointsPerPlayer](FRHICommandListImmediate& RHICmdList)
+			{
+				const FUpdateTextureRegion2D Region(0, 0, 0, 0, Width, 1);
+				RHICmdList.UpdateTexture2D(Res->GetTexture2DRHI(), 0, Region, Width * sizeof(FLinearColor),
+										   reinterpret_cast<const uint8*>(Data->GetData()));
+				delete Data;
+			}
+		);
 	}
+	else { delete MatrixTextureDataCopy; }
 
-	// --- BƯỚC 4: CẬP NHẬT CÁC THAM SỐ MATERIAL CHO LOCAL PLAYER ---
 
-	// 4.1. Cập nhật các tham số trên MID của Post Process
+	// --- BƯỚC 3: CẬP NHẬT CÁC THAM SỐ CHUNG ---
 	PostProcessMID->SetScalarParameterValue(FName("NumSources"), NumSources);
-
-	// 4.2. Ghi lại Depth Map từ góc nhìn người chơi local
-	DepthCaptureComponent->SetWorldLocationAndRotation(MyData.EyeLocation, MyData.ForwardVector.Rotation());
-	DepthCaptureComponent->FOVAngle = VisionAngleDegrees;
-	DepthCaptureComponent->CaptureScene();
-
-	// 4.3. Tính toán ma trận View-Projection để gửi vào shader
-	// SỬA LỖI: Sử dụng cách tính ma trận chính xác hơn
-	// const FMatrix ViewMatrix = FViewMatrix(MyData.EyeLocation, MyData.EyeLocation + MyData.ForwardVector, FVector::UpVector);
-	const FMatrix ViewMatrix = FLookFromMatrix(MyData.EyeLocation, MyData.ForwardVector, FVector::UpVector);
-	const float AspectRatio = static_cast<float>(DepthRenderTarget->SizeX) / static_cast<float>(DepthRenderTarget->
-		SizeY);
-	const float HorizontalFOVRadians = FMath::DegreesToRadians(VisionAngleDegrees);
-	// Chuyển đổi FOV ngang sang dọc
-	const float VerticalFOVRadians = 2.0f * FMath::Atan(FMath::Tan(HorizontalFOVRadians * 0.5f) / AspectRatio);
-	// SỬA LỖI: Dùng VisionDistance cho far plane thay vì GNearClippingPlane
-	const FMatrix ProjectionMatrix = FReversedZPerspectiveMatrix(VerticalFOVRadians * 0.5f, AspectRatio, 1.0f,
-																 VisionDistance);
-	const FMatrix ViewProjectionMatrix = ViewMatrix * ProjectionMatrix;
-
-	// 4.4. Gửi ma trận và các tham số khác vào Material Parameter Collection (MPC)
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow0"),
-													FLinearColor(ViewProjectionMatrix.M[0][0],
-																 ViewProjectionMatrix.M[0][1],
-																 ViewProjectionMatrix.M[0][2],
-																 ViewProjectionMatrix.M[0][3]));
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow1"),
-													FLinearColor(ViewProjectionMatrix.M[1][0],
-																 ViewProjectionMatrix.M[1][1],
-																 ViewProjectionMatrix.M[1][2],
-																 ViewProjectionMatrix.M[1][3]));
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow2"),
-													FLinearColor(ViewProjectionMatrix.M[2][0],
-																 ViewProjectionMatrix.M[2][1],
-																 ViewProjectionMatrix.M[2][2],
-																 ViewProjectionMatrix.M[2][3]));
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow3"),
-													FLinearColor(ViewProjectionMatrix.M[3][0],
-																 ViewProjectionMatrix.M[3][1],
-																 ViewProjectionMatrix.M[3][2],
-																 ViewProjectionMatrix.M[3][3]));
-
 	const float VisionConeCos = FMath::Cos(FMath::DegreesToRadians(VisionAngleDegrees * 0.5f));
-	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("VisionConeCosine"), VisionConeCos);
-	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("VisionMaxDistance"), VisionDistance);
-	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("ProximityRadius"), ProximityRadius);
-	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("ProximityMaxHeight"),
-													ProximityMaxHeight);
-	// Gửi thêm các dữ liệu của local player vào MPC để shader không cần đọc lại từ texture
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("PlayerPosition"),
-													FLinearColor(MyData.EyeLocation));
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("PlayerForwardVector"),
-													FLinearColor(MyData.ForwardVector));
-	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("PlayerGroundPosition"),
-													FLinearColor(MyData.GroundLocation));
+	PostProcessMID->SetScalarParameterValue(FName("VisionConeCosine"), VisionConeCos);
+	PostProcessMID->SetScalarParameterValue(FName("VisionMaxDistance"), VisionDistance);
+	PostProcessMID->SetScalarParameterValue(FName("ProximityRadius"), ProximityRadius);
+	PostProcessMID->SetScalarParameterValue(FName("ProximityMaxHeight"), ProximityMaxHeight);
 
-	// --- BƯỚC 5: VẼ DEBUG (NẾU ĐƯỢC BẬT) ---
+	// --- BƯỚC 4: VẼ DEBUG ---
 #if ENABLE_DRAW_DEBUG
 	if (bIsShowDebug)
 	{
-		// Vẽ debug cho chính mình
-		DrawDebugCone(GetWorld(), MyData.EyeLocation, MyData.ForwardVector, VisionDistance,
-					  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f),
-					  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, FColor::Green, false, 0.0f, 0, 1.0f);
-		DrawDebugCylinder(GetWorld(), MyData.GroundLocation - FVector(0, 0, ProximityMaxHeight),
-						  MyData.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32, FColor::Blue,
-						  false, 0.0f, 0, 1.0f);
-
-		// Vẽ debug cho đồng đội
-		for (int i = 1; i < NumSources; ++i)
+		for (int i = 0; i < AllDebugData.Num(); ++i)
 		{
-			const FTeammateVisionData& Teammate = AllSourcesData[i];
-			DrawDebugCone(GetWorld(), Teammate.EyeLocation, Teammate.ForwardVector, VisionDistance,
+			const FTeammateVisionData& Source = AllDebugData[i];
+			FColor DebugColor = (i == 0) ? FColor::Green : FColor::Cyan;
+			float DebugThickness = (i == 0) ? 1.0f : 0.5f;
+
+			DrawDebugCone(GetWorld(), Source.EyeLocation, Source.ForwardVector, VisionDistance,
 						  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f),
-						  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, FColor::Cyan, false, 0.0f, 0, 0.5f);
-			DrawDebugCylinder(GetWorld(), Teammate.GroundLocation - FVector(0, 0, ProximityMaxHeight),
-							  Teammate.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32,
-							  FColor::Cyan, false, 0.0f, 0, 0.5f);
+						  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, DebugColor, false, 0.0f, 0,
+						  DebugThickness);
+			DrawDebugCylinder(GetWorld(), Source.GroundLocation - FVector(0, 0, ProximityMaxHeight),
+							  Source.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32,
+							  DebugColor, false, 0.0f, 0, DebugThickness);
 		}
 	}
 #endif
