@@ -2,8 +2,10 @@
 
 
 #include "OBVisibilityFogComponent.h"
+#include "TimerManager.h"
 
 #include "Components/SceneCaptureComponent2D.h"
+#include "Engine/OverlapResult.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/KismetMaterialLibrary.h"
 #include "Materials/MaterialParameterCollection.h"
@@ -12,13 +14,11 @@
 UOBVisibilityFogComponent::UOBVisibilityFogComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	// Mặc định tắt Tick, sẽ được bật lại trong BeginPlay nếu mọi thứ hợp lệ
-	SetComponentTickEnabled(false);
 }
 
 void UOBVisibilityFogComponent::InitializeFogComponents(USceneCaptureComponent2D* CaptureComponent,
-														UPostProcessComponent* PostProcessComponent,
-														UMaterial* InFogPostProcessMaterial)
+                                                        UPostProcessComponent* PostProcessComponent,
+                                                        UMaterial* InFogPostProcessMaterial)
 {
 	DepthCaptureComponent = CaptureComponent;
 	FogPostProcessComponent = PostProcessComponent;
@@ -28,15 +28,16 @@ void UOBVisibilityFogComponent::InitializeFogComponents(USceneCaptureComponent2D
 void UOBVisibilityFogComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	SetComponentTickEnabled(false);
 
 	// --- BƯỚC 1: KIỂM TRA CÁC ĐỐI TƯỢNG PHỤ THUỘC ---
 	if (!IsValid(DepthCaptureComponent) || !IsValid(DepthRenderTarget) || !IsValid(VisionMPC) || !
 		IsValid(FogPostProcessComponent) || !IsValid(FogPostProcessMaterial))
 	{
 		UE_LOG(LogTemp, Warning,
-			   TEXT(
-				   "UOBVisibilityFogComponent trên Actor '%s' thiếu các dependency cần thiết. Component sẽ bị vô hiệu hóa."
-			   ), *GetOwner()->GetName());
+		       TEXT(
+			       "UOBVisibilityFogComponent trên Actor '%s' thiếu các dependency cần thiết. Component sẽ bị vô hiệu hóa."
+		       ), *GetOwner()->GetName());
 		return; // Không tiếp tục nếu thiếu
 	}
 
@@ -87,13 +88,18 @@ void UOBVisibilityFogComponent::BeginPlay()
 	Settings.bOverride_VignetteIntensity = true;
 	Settings.VignetteIntensity = 0.0f;
 
-	// Mọi thứ đã sẵn sàng, bật Tick Component
-	bIsReadyToUpdate = true;
-	SetComponentTickEnabled(true);
+	DepthCaptureComponent->HiddenActors.Add(GetOwner());
+
+	FTimerHandle TimerHandle;
+	GetWorld()->GetTimerManager().SetTimer(TimerHandle, [this]()
+	{
+		bIsReadyToUpdate = true;
+		SetComponentTickEnabled(true);
+	}, 1.0f, false);
 }
 
 void UOBVisibilityFogComponent::TickComponent(float DeltaTime, ELevelTick TickType,
-											  FActorComponentTickFunction* ThisTickFunction)
+                                              FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	// Logic chính được gọi từ bên ngoài thông qua hàm UpdateData
@@ -145,10 +151,10 @@ void UOBVisibilityFogComponent::UpdateData(const TArray<FTeammateVisionData>& In
 		const FTeammateVisionData& Source = AllSourcesData[i];
 		// Dữ liệu 1: Vị trí mắt (XYZ), Vị trí mặt đất (W là Z)
 		(*TextureDataCopy)[i * DataPointsPerPlayer + 0] = FLinearColor(Source.EyeLocation.X, Source.EyeLocation.Y,
-																	   Source.EyeLocation.Z, Source.GroundLocation.Z);
+		                                                               Source.EyeLocation.Z, Source.GroundLocation.Z);
 		// Dữ liệu 2: Hướng nhìn (XYZ)
 		(*TextureDataCopy)[i * DataPointsPerPlayer + 1] = FLinearColor(Source.ForwardVector.X, Source.ForwardVector.Y,
-																	   Source.ForwardVector.Z, 0.0f);
+		                                                               Source.ForwardVector.Z, 0.0f);
 	}
 
 	if (FTexture2DResource* TextureResource = static_cast<FTexture2DResource*>(SourceDataTexture->GetResource()))
@@ -159,7 +165,7 @@ void UOBVisibilityFogComponent::UpdateData(const TArray<FTeammateVisionData>& In
 				const int32 DataSize = TextureWidth * sizeof(FLinearColor);
 				const FUpdateTextureRegion2D Region(0, 0, 0, 0, TextureWidth, 1);
 				RHICmdList.UpdateTexture2D(TextureResource->GetTexture2DRHI(), 0, Region, DataSize,
-										   reinterpret_cast<const uint8*>(TextureDataCopy->GetData()));
+				                           reinterpret_cast<const uint8*>(TextureDataCopy->GetData()));
 				// Quan trọng: Giải phóng bộ nhớ sau khi đã sử dụng xong trên Render Thread
 				delete TextureDataCopy;
 			}
@@ -176,10 +182,38 @@ void UOBVisibilityFogComponent::UpdateData(const TArray<FTeammateVisionData>& In
 	// 4.1. Cập nhật các tham số trên MID của Post Process
 	PostProcessMID->SetScalarParameterValue(FName("NumSources"), NumSources);
 
+	// 4.1. Tìm tất cả các actor trong tầm nhìn bằng Sphere Overlap và kiểm tra góc
+	TArray<FOverlapResult> OverlapResults;
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(FogOfWarTrace), false, OwnerActor);
+	GetWorld()->OverlapMultiByChannel(OverlapResults, MyData.EyeLocation, FQuat::Identity, VisionTraceChannel,
+	                                  FCollisionShape::MakeSphere(VisionDistance), QueryParams);
+
+	TSet<AActor*> ActorsInCone;
+	const float VisionConeCos = FMath::Cos(FMath::DegreesToRadians(VisionAngleDegrees * 0.5f));
+
+	for (const FOverlapResult& Result : OverlapResults)
+	{
+		if (AActor* OverlappedActor = Result.GetActor(); IsValid(OverlappedActor) && !ActorsInCone.Contains(
+			OverlappedActor))
+		{
+			if (const FVector DirectionToActor = (OverlappedActor->GetActorLocation() - MyData.EyeLocation).
+					GetSafeNormal();
+				FVector::DotProduct(MyData.ForwardVector, DirectionToActor) >= VisionConeCos)
+			{
+				ActorsInCone.Add(OverlappedActor);
+			}
+		}
+	}
+
+	// 4.2. Chỉ thị cho SceneCapture chỉ render những actor đã tìm thấy
+	DepthCaptureComponent->ShowOnlyActors = ActorsInCone.Array();
+
 	// 4.2. Ghi lại Depth Map từ góc nhìn người chơi local
 	DepthCaptureComponent->SetWorldLocationAndRotation(MyData.EyeLocation, MyData.ForwardVector.Rotation());
 	DepthCaptureComponent->FOVAngle = VisionAngleDegrees;
 	DepthCaptureComponent->CaptureScene();
+
+	DepthCaptureComponent->ShowOnlyActors.Empty();
 
 	// 4.3. Tính toán ma trận View-Projection để gửi vào shader
 	// SỬA LỖI: Sử dụng cách tính ma trận chính xác hơn
@@ -192,44 +226,44 @@ void UOBVisibilityFogComponent::UpdateData(const TArray<FTeammateVisionData>& In
 	const float VerticalFOVRadians = 2.0f * FMath::Atan(FMath::Tan(HorizontalFOVRadians * 0.5f) / AspectRatio);
 	// SỬA LỖI: Dùng VisionDistance cho far plane thay vì GNearClippingPlane
 	const FMatrix ProjectionMatrix = FReversedZPerspectiveMatrix(VerticalFOVRadians * 0.5f, AspectRatio, 1.0f,
-																 VisionDistance);
+	                                                             VisionDistance);
 	const FMatrix ViewProjectionMatrix = ViewMatrix * ProjectionMatrix;
 
 	// 4.4. Gửi ma trận và các tham số khác vào Material Parameter Collection (MPC)
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow0"),
-													FLinearColor(ViewProjectionMatrix.M[0][0],
-																 ViewProjectionMatrix.M[0][1],
-																 ViewProjectionMatrix.M[0][2],
-																 ViewProjectionMatrix.M[0][3]));
+	                                                FLinearColor(ViewProjectionMatrix.M[0][0],
+	                                                             ViewProjectionMatrix.M[0][1],
+	                                                             ViewProjectionMatrix.M[0][2],
+	                                                             ViewProjectionMatrix.M[0][3]));
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow1"),
-													FLinearColor(ViewProjectionMatrix.M[1][0],
-																 ViewProjectionMatrix.M[1][1],
-																 ViewProjectionMatrix.M[1][2],
-																 ViewProjectionMatrix.M[1][3]));
+	                                                FLinearColor(ViewProjectionMatrix.M[1][0],
+	                                                             ViewProjectionMatrix.M[1][1],
+	                                                             ViewProjectionMatrix.M[1][2],
+	                                                             ViewProjectionMatrix.M[1][3]));
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow2"),
-													FLinearColor(ViewProjectionMatrix.M[2][0],
-																 ViewProjectionMatrix.M[2][1],
-																 ViewProjectionMatrix.M[2][2],
-																 ViewProjectionMatrix.M[2][3]));
+	                                                FLinearColor(ViewProjectionMatrix.M[2][0],
+	                                                             ViewProjectionMatrix.M[2][1],
+	                                                             ViewProjectionMatrix.M[2][2],
+	                                                             ViewProjectionMatrix.M[2][3]));
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("MatrixRow3"),
-													FLinearColor(ViewProjectionMatrix.M[3][0],
-																 ViewProjectionMatrix.M[3][1],
-																 ViewProjectionMatrix.M[3][2],
-																 ViewProjectionMatrix.M[3][3]));
+	                                                FLinearColor(ViewProjectionMatrix.M[3][0],
+	                                                             ViewProjectionMatrix.M[3][1],
+	                                                             ViewProjectionMatrix.M[3][2],
+	                                                             ViewProjectionMatrix.M[3][3]));
 
-	const float VisionConeCos = FMath::Cos(FMath::DegreesToRadians(VisionAngleDegrees * 0.5f));
+	// const float VisionConeCos = FMath::Cos(FMath::DegreesToRadians(VisionAngleDegrees * 0.5f));
 	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("VisionConeCosine"), VisionConeCos);
 	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("VisionMaxDistance"), VisionDistance);
 	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("ProximityRadius"), ProximityRadius);
 	UKismetMaterialLibrary::SetScalarParameterValue(GetWorld(), VisionMPC, FName("ProximityMaxHeight"),
-													ProximityMaxHeight);
+	                                                ProximityMaxHeight);
 	// Gửi thêm các dữ liệu của local player vào MPC để shader không cần đọc lại từ texture
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("PlayerPosition"),
-													FLinearColor(MyData.EyeLocation));
+	                                                FLinearColor(MyData.EyeLocation));
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("PlayerForwardVector"),
-													FLinearColor(MyData.ForwardVector));
+	                                                FLinearColor(MyData.ForwardVector));
 	UKismetMaterialLibrary::SetVectorParameterValue(GetWorld(), VisionMPC, FName("PlayerGroundPosition"),
-													FLinearColor(MyData.GroundLocation));
+	                                                FLinearColor(MyData.GroundLocation));
 
 	// --- BƯỚC 5: VẼ DEBUG (NẾU ĐƯỢC BẬT) ---
 #if ENABLE_DRAW_DEBUG
@@ -237,22 +271,22 @@ void UOBVisibilityFogComponent::UpdateData(const TArray<FTeammateVisionData>& In
 	{
 		// Vẽ debug cho chính mình
 		DrawDebugCone(GetWorld(), MyData.EyeLocation, MyData.ForwardVector, VisionDistance,
-					  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f),
-					  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, FColor::Green, false, 0.0f, 0, 1.0f);
+		              FMath::DegreesToRadians(VisionAngleDegrees * 0.5f),
+		              FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, FColor::Green, false, 0.0f, 0, 1.0f);
 		DrawDebugCylinder(GetWorld(), MyData.GroundLocation - FVector(0, 0, ProximityMaxHeight),
-						  MyData.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32, FColor::Blue,
-						  false, 0.0f, 0, 1.0f);
+		                  MyData.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32, FColor::Blue,
+		                  false, 0.0f, 0, 1.0f);
 
 		// Vẽ debug cho đồng đội
 		for (int i = 1; i < NumSources; ++i)
 		{
 			const FTeammateVisionData& Teammate = AllSourcesData[i];
 			DrawDebugCone(GetWorld(), Teammate.EyeLocation, Teammate.ForwardVector, VisionDistance,
-						  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f),
-						  FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, FColor::Cyan, false, 0.0f, 0, 0.5f);
+			              FMath::DegreesToRadians(VisionAngleDegrees * 0.5f),
+			              FMath::DegreesToRadians(VisionAngleDegrees * 0.5f), 32, FColor::Cyan, false, 0.0f, 0, 0.5f);
 			DrawDebugCylinder(GetWorld(), Teammate.GroundLocation - FVector(0, 0, ProximityMaxHeight),
-							  Teammate.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32,
-							  FColor::Cyan, false, 0.0f, 0, 0.5f);
+			                  Teammate.GroundLocation + FVector(0, 0, ProximityMaxHeight), ProximityRadius, 32,
+			                  FColor::Cyan, false, 0.0f, 0, 0.5f);
 		}
 	}
 #endif

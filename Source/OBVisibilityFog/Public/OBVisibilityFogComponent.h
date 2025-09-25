@@ -92,6 +92,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Dependencies")
 	TObjectPtr<UMaterialParameterCollection> VisionMPC;
 
+	/** Kênh va chạm dùng cho việc tìm các actor trong tầm nhìn. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
+	TEnumAsByte<ECollisionChannel> VisionTraceChannel = ECC_WorldStatic;
+	
 	/** Khoảng cách tối đa của hình nón tầm nhìn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float VisionDistance = 2000.0f;
