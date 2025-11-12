@@ -15,20 +15,19 @@
 USTRUCT(BlueprintType)
 struct FTeammateVisionData
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    // Vị trí mắt (nguồn của tầm nhìn)
-    UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
-    FVector EyeLocation;
-
-    // Vector chỉ hướng nhìn về phía trước
-    UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
-    FVector ForwardVector;
-
-    // Vị trí trên mặt đất, dùng cho vùng bán kính xung quanh
+	// Vị trí mắt (nguồn của tầm nhìn)
 	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
-	FVector GroundLocation;
+	FVector EyeLocation = FVector::ZeroVector;
 
+	// Vector chỉ hướng nhìn về phía trước
+	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+	FVector ForwardVector = FVector::ZeroVector;
+
+	// Vị trí trên mặt đất, dùng cho vùng bán kính xung quanh
+	UPROPERTY(BlueprintReadWrite, Category = "Vision Data")
+	FVector GroundLocation = FVector::ZeroVector;
 };
 
 /**
@@ -53,7 +52,7 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Visibility Fog")
 	void InitializeFogComponents(USceneCaptureComponent2D* CaptureComponent,
-								 UPostProcessComponent* PostProcessComponent, UMaterial* InFogPostProcessMaterial);
+	                             UPostProcessComponent* PostProcessComponent, UMaterial* InFogPostProcessMaterial);
 
 	/**
 	 * Cập nhật dữ liệu tầm nhìn từ tất cả các nguồn (bản thân và đồng đội).
@@ -68,7 +67,7 @@ protected:
 
 public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
-							   FActorComponentTickFunction* ThisTickFunction) override;
+	                           FActorComponentTickFunction* ThisTickFunction) override;
 
 	// --- CÁC THAM SỐ CẤU HÌNH (Được thiết lập trên Character) ---
 
@@ -95,23 +94,23 @@ public:
 	/** Kênh va chạm dùng cho việc tìm các actor trong tầm nhìn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	TEnumAsByte<ECollisionChannel> VisionTraceChannel = ECC_WorldStatic;
-	
+
 	/** Khoảng cách tối đa của hình nón tầm nhìn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float VisionDistance = 2000.0f;
-	
+
 	/** Góc của hình nón tầm nhìn (tính bằng độ). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float VisionAngleDegrees = 90.0f;
 
 	/** Bán kính của vùng phát hiện xung quanh người chơi. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
-	float ProximityRadius = 100.0f; 
+	float ProximityRadius = 100.0f;
 
 	/** Chiều cao tối đa mà vùng bán kính xung quanh có thể ảnh hưởng. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Config")
 	float ProximityMaxHeight = 200.0f;
-	
+
 	/** Bật/tắt hiển thị debug. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visibility Fog|Debug")
 	bool bIsShowDebug = false;
@@ -128,7 +127,7 @@ private:
 	// Material Instance Dynamic của Post Process để có thể thay đổi tham số lúc runtime.
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> PostProcessMID;
-	
+
 	// Số lượng người chơi tối đa mà hệ thống hỗ trợ.
 	const int32 MaxTeamSize = 8;
 	// Số điểm dữ liệu cho mỗi người chơi (1 cho vị trí, 1 cho hướng nhìn).
